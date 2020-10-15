@@ -145,6 +145,7 @@ look_for_display__systemd()
         return 1
     fi
 
+    env="`echo "$env" | sed 's/^/export /'`"
     eval "$env"
 }
 
@@ -173,6 +174,7 @@ look_for_display__procfs()
         return 1
     fi
 
+    env="`echo "$env" | sed 's/^/export /'`"
     eval "$env"
 }
 
@@ -248,8 +250,14 @@ run_xsel()
 
 do_i()
 {
-    local data="`cat`"
+    local data=""
     local uniq_suffix="$$"
+
+    if test -n "$1" ; then
+        data="`cat "$1"`"
+    else
+        data="`cat`"
+    fi
 
     if test y"$SDE_COMMON_CLIPBOARD_X11_ENABLED" = yy ; then
         (
@@ -304,8 +312,11 @@ while test -n "$1" ; do
             changelog > /dev/stderr
             exit 0
         ;;
-        *)
+        -*)
             die "unknown option: $1"
+        ;;
+        *)
+            break
         ;;
     esac
     shift
@@ -315,7 +326,7 @@ look_for_display
 
 case "$ACTION" in
     -i)
-        do_i
+        do_i "$1"
         ;;
     -o)
         do_o
