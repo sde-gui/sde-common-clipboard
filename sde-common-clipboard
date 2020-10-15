@@ -308,6 +308,7 @@ while test -n "$1" ; do
             die "unknown option: $1"
         ;;
     esac
+    shift
 done
 
 look_for_display
