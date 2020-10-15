@@ -1,0 +1,326 @@
+#!/bin/sh
+
+# 
+# Wrapper to integrate clipboard functions into console applications
+# Author: Vadim Ushakov
+# 
+# This is free and unencumbered software released into the public domain.
+# 
+# Anyone is free to copy, modify, publish, use, compile, sell, or
+# distribute this software, either in source code form or as a compiled
+# binary, for any purpose, commercial or non-commercial, and by any
+# means.
+# 
+# In jurisdictions that recognize copyright laws, the author or authors
+# of this software dedicate any and all copyright interest in the
+# software to the public domain. We make this dedication for the benefit
+# of the public at large and to the detriment of our heirs and
+# successors. We intend this dedication to be an overt act of
+# relinquishment in perpetuity of all present and future rights to this
+# software under copyright law.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+# OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+# ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+# 
+# For more information, please refer to <http://unlicense.org/>
+
+################################################################################
+
+# XDG paths
+
+_="${XDG_CONFIG_HOME:=$HOME/.config}"
+_="${XDG_CACHE_HOME:=$HOME/.cache}"
+
+# Application paths
+
+_="${SDE_COMMON_CLIPBOARD_CONFIG_HOME:=$XDG_CONFIG_HOME/sde-common-clipboard}"
+_="${SDE_COMMON_CLIPBOARD_CACHE_HOME:=$XDG_CACHE_HOME/sde-common-clipboard}"
+
+# Default settings
+
+_="${SDE_COMMON_CLIPBOARD_CONFIG_FILE:=$SDE_COMMON_CLIPBOARD_CONFIG_HOME/config}"
+_="${SDE_COMMON_CLIPBOARD_FILE_STORAGE:=$SDE_COMMON_CLIPBOARD_CACHE_HOME/clipboard}"
+
+_="${SDE_COMMON_CLIPBOARD_XCLIP:=xclip}"
+_="${SDE_COMMON_CLIPBOARD_XSEL:=xsel}"
+
+_="${SDE_COMMON_CLIPBOARD_FILE_STORAGE_ENABLED:=y}"
+_="${SDE_COMMON_CLIPBOARD_X11_ENABLED:=y}"
+_="${SDE_COMMON_CLIPBOARD_XCLIP_ENABLED:=y}"
+_="${SDE_COMMON_CLIPBOARD_XSEL_ENABLED:=y}"
+
+# Include config file, if any
+
+if test -f "$SDE_COMMON_CLIPBOARD_CONFIG_FILE" ; then
+    . "$SDE_COMMON_CLIPBOARD_CONFIG_FILE"
+fi
+
+################################################################################
+
+MY_NAME="$0"
+
+die()
+{
+    echo "$MY_NAME:" "$@" > /dev/stderr
+    exit 1
+}
+
+has_command()
+{
+    which "$1" >/dev/null 2>/dev/null
+}
+
+################################################################################
+
+changelog()
+{
+    printf "\
+
+1.0.0 - 2018-10-15
+* Initial release.
+"
+}
+
+
+usage()
+{
+    local _0="`basename "$MY_NAME"`"
+    printf "\
+Usage: %s: [options] command
+Version: 1.0.0
+The wrapper to integrate clipboard functions into console applications
+
+Options:
+
+    -i              Read stdin and store it into the clipboard
+    -o              Print the clipboard contents to stdout
+    -H              Print ChangeLog
+    -h              Print this help and exit
+
+Your rights:
+
+  This is free and unencumbered software released into the public domain.
+
+  Anyone is free to copy, modify, publish, use, compile, sell, or
+  distribute this software, either in source code form or as a compiled
+  binary, for any purpose, commercial or non-commercial, and by any
+  means.
+
+  In jurisdictions that recognize copyright laws, the author or authors
+  of this software dedicate any and all copyright interest in the
+  software to the public domain. We make this dedication for the benefit
+  of the public at large and to the detriment of our heirs and
+  successors. We intend this dedication to be an overt act of
+  relinquishment in perpetuity of all present and future rights to this
+  software under copyright law.
+
+  THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,
+  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+  IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+  OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+  ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+  OTHER DEALINGS IN THE SOFTWARE.
+
+  For more information about the license,
+  please refer to <http://unlicense.org/>
+" "$_0"
+}
+
+################################################################################
+
+look_for_display__systemd()
+{
+    if ! has_command systemctl ; then
+        return 1
+    fi
+
+    local env="`systemctl --user show-environment 2>/dev/null | grep '^DISPLAY=.\|^XAUTHORITY=.'`"
+    if ! echo "$env" | grep -q '^DISPLAY=' ; then
+        return 1
+    fi
+
+    eval "$env"
+}
+
+cat_proc_environ()
+{
+    ps -u $(id -u) -o pid= | \
+    xargs -I{} cat /proc/{}/environ 2>/dev/null | \
+    tr '\0' '\n'
+}
+
+look_for_display__procfs()
+{
+    # sed 's/^DISPLAY=:[0-9]$/&.0/' is needed, since some processes have DISPLAY
+    # defined with the screen number and some have not, for some reason.
+    local env="`
+        cat_proc_environ | \
+        grep '^DISPLAY=.\|^XAUTHORITY=.' | \
+        sed 's/^DISPLAY=:[0-9]$/&.0/' | \
+        sort | uniq
+    `"
+
+    # There should be exactly 2 lines: one for DISPLAY and one for XAUTHORITY.
+    # If there are more lines, we seem to have >1 display servers running.
+    # In that case, we just give up and not connecting to any.
+    if test "`echo "$env" | wc -l`" -ne 2 ; then
+        return 1
+    fi
+
+    eval "$env"
+}
+
+look_for_display()
+{
+    if test y"$SDE_COMMON_CLIPBOARD_X11_ENABLED" != yy ; then
+        return
+    fi
+
+    if test -n "$DISPLAY" ; then
+        return
+    fi
+
+    look_for_display__systemd
+    if test $? -eq 0 ; then
+        return
+    fi
+
+    look_for_display__procfs
+}
+
+################################################################################
+
+run_xclip()
+{
+    if test -z "$DISPLAY" ; then
+        return 1
+    fi
+
+    if test y"$SDE_COMMON_CLIPBOARD_X11_ENABLED" != yy ; then
+        return 1
+    fi
+
+    if test y"$SDE_COMMON_CLIPBOARD_XCLIP_ENABLED" != yy ; then
+        return 1
+    fi
+
+    if test -z "$SDE_COMMON_CLIPBOARD_XCLIP" ; then
+        return 1
+    fi
+
+    if ! has_command "$SDE_COMMON_CLIPBOARD_XCLIP" ; then
+        return 1
+    fi
+
+    "$SDE_COMMON_CLIPBOARD_XCLIP" "$@"
+}
+
+run_xsel()
+{
+    if test -z "$DISPLAY" ; then
+        return 1
+    fi
+
+    if test y"$SDE_COMMON_CLIPBOARD_X11_ENABLED" != y ; then
+        return 1
+    fi
+
+    if test y"$SDE_COMMON_CLIPBOARD_XSEL_ENABLED" != y ; then
+        return 1
+    fi
+
+    if test -z "$SDE_COMMON_CLIPBOARD_XSEL" ; then
+        return 1
+    fi
+
+    if ! has_command "$SDE_COMMON_CLIPBOARD_XSEL" ; then
+        return 1
+    fi
+
+    "$SDE_COMMON_CLIPBOARD_XSEL" "$@"
+}
+
+do_i()
+{
+    local data="`cat`"
+    local uniq_suffix="$$"
+
+    if test y"$SDE_COMMON_CLIPBOARD_X11_ENABLED" = yy ; then
+        (
+            echo "$data" | run_xclip -i -selection clipboard
+        ) || (
+            echo "$data" | run_xsel -i -b
+        )
+    fi
+
+    if test y"$SDE_COMMON_CLIPBOARD_FILE_STORAGE_ENABLED" = yy &&
+       test -n "$SDE_COMMON_CLIPBOARD_FILE_STORAGE"
+    then
+        local dir="`dirname "$SDE_COMMON_CLIPBOARD_FILE_STORAGE"`"
+        mkdir -p "$dir" \
+        && printf "%s" "$data" > "$SDE_COMMON_CLIPBOARD_FILE_STORAGE.$uniq_suffix" \
+        && mv "$SDE_COMMON_CLIPBOARD_FILE_STORAGE.$uniq_suffix" "$SDE_COMMON_CLIPBOARD_FILE_STORAGE"
+    fi
+}
+
+do_o()
+{
+    (
+        echo "$data" | run_xclip -o -selection clipboard
+    ) || (
+        echo "$data" | run_xsel -i -b
+    ) || (
+        if test y"$SDE_COMMON_CLIPBOARD_FILE_STORAGE_ENABLED" = yy &&
+           test -n "$SDE_COMMON_CLIPBOARD_FILE_STORAGE" &&
+           test -f "$SDE_COMMON_CLIPBOARD_FILE_STORAGE"
+        then
+           cat "$SDE_COMMON_CLIPBOARD_FILE_STORAGE"
+        fi
+    )
+}
+
+################################################################################
+
+# Parse command-line
+
+ACTION="-o"
+
+while test -n "$1" ; do
+    case "$1" in
+        -[io])
+            ACTION="$1"
+        ;;
+        -h)
+            usage > /dev/stderr
+            exit 0
+        ;;
+        -H)
+            changelog > /dev/stderr
+            exit 0
+        ;;
+        *)
+            die "unknown option: $1"
+        ;;
+    esac
+done
+
+look_for_display
+
+case "$ACTION" in
+    -i)
+        do_i
+        ;;
+    -o)
+        do_o
+        ;;
+    *)
+        die "internal error: unknown action: $ACTION"
+        ;;
+esac
+
